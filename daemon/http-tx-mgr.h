@@ -158,6 +158,24 @@ http_tx_manager_check_head_commit (HttpTxManager *manager,
                                    HttpHeadCommitCallback callback,
                                    void *user_data);
 
+struct _HttpFolderPerms {
+    gboolean success;
+    GList *folder_perms;
+};
+typedef struct _HttpFolderPerms HttpFolderPerms;
+
+typedef void (*HttpGetFolderPermsCallback) (HttpFolderPerms *result,
+                                            void *user_data);
+
+/* Asynchronous interface for getting folder permissions for a repo. */
+int
+http_tx_manager_get_folder_perms (HttpTxManager *manager,
+                                  const char *repo_id,
+                                  const char *host,
+                                  const char *token,
+                                  HttpGetFolderPermsCallback callback,
+                                  void *user_data);
+
 int
 http_tx_task_download_file_blocks (HttpTxTask *task, const char *file_id);
 

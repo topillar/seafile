@@ -266,6 +266,143 @@ locked_file_set_lookup (LockedFileSet *fset, const char *path)
     return (LockedFile *) g_hash_table_lookup (fset->locked_files, path);
 }
 
+/* Folder permissions. */
+
+FolderPerm *
+folder_perm_new (const char *path, const char *permission)
+{
+    FolderPerm *perm = g_new0 (FolderPerm, 1);
+
+    perm->path = g_strdup(path);
+    perm->permission = g_strdup(permission);
+
+    return perm;
+}
+
+void
+folder_perm_free (FolderPerm *perm)
+{
+    if (!perm)
+        return;
+
+    g_free (perm->path);
+    g_free (perm->permission);
+    g_free (perm);
+}
+
+int
+seaf_repo_manager_update_folder_perms (SeafRepoManager *mgr,
+                                       const char *repo_id,
+                                       glist *folder_perms)
+{
+    char *sql;
+    sqlite3_stmt *stmt;
+    GList *ptr;
+    FolderPerm *perm;
+
+    pthread_mutex_lock (&mgr->priv->db_lock);
+
+    sql = "DELETE FROM FolderPerms WHERE repo_id = ?";
+    stmt = sqlite_query_prepare (mgr->priv->db, sql);
+    sqlite3_bind_text (stmt, 1, repo_id, -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) != SQLITE_DONE) {
+        seaf_warning ("Failed to remove folder perms for %.8s: %s.\n",
+                      repo_id, sqlite3_errmsg (mgr->priv->db));
+        sqlite3_finalize (stmt);
+        pthread_mutex_unlock (&mgr->priv->db_lock);
+        return -1;
+    }
+    sqlite3_finalize (stmt);
+
+    if (!folder_perms) {
+        pthread_mutex_unlock (&mgr->priv->db_lock);
+        return 0;
+    }
+
+    sql = "INSERT INTO FolderPerms VALUES (?, ?, ?)";
+    stmt = sqlite_query_prepare (mgr->priv->db, sql);
+
+    for (ptr = folder_perms; ptr; ptr = ptr->next) {
+        perm = ptr->data;
+
+        sqlite3_bind_text (stmt, 1, repo_id, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text (stmt, 2, perm->path, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text (stmt, 3, perm->permission, -1, SQLITE_TRANSIENT);
+
+        if (sqlite3_step (stmt) != SQLITE_DONE) {
+            seaf_warning ("Failed to insert folder perms for %.8s: %s.\n",
+                          repo_id, sqlite3_errmsg (mgr->priv->db));
+            sqlite3_finalize (stmt);
+            pthread_mutex_unlock (&mgr->priv->db_lock);
+            return -1;
+        }
+
+        sqlite3_reset (stmt);
+        sqlite3_clear_bindings (stmt);
+    }
+
+    sqlite3_finalize (stmt);
+
+    pthread_mutex_unlock (&mgr->priv->db_lock);
+
+    return 0;
+}
+
+static gboolean
+load_folder_perm (sqlite3_stmt *stmt, void *data)
+{
+    GList **p_perms = data;
+    const char *path, *permission;
+
+    path = sqlite3_column_text (stmt, 0);
+    permission = sqlite3_column_text (stmt, 1);
+
+    FolderPerm *perm = folder_perm_new (path, permission);
+    *p_perms = g_list_prepend (*p_perms, perm);
+
+    return TRUE;
+}
+
+static gint
+comp_folder_perms (gconstpointer a, gconstpointer b)
+{
+    const FolderPerm *perm_a = a, *perm_b = b;
+
+    return (strcmp (perm_b->path, perm_a->path));
+}
+
+GList *
+seaf_repo_manager_load_folder_perms (SeafRepoManager *mgr,
+                                     const char *repo_id)
+{
+    GList *perms = NULL;
+    char sql[256];
+
+    sqlite3_snprintf (sizeof(sql), sql,
+                      "SELECT path, permission FROM FolderPerms "
+                      "WHERE repo_id = '%q'",
+                      repo_id);
+
+    pthread_mutex_lock (&mgr->priv->db_lock);
+
+    if (sqlite_foreach_selected_row (mgr->priv->db, sql,
+                                     load_folder_perm, &perms) < 0) {
+        pthread_mutex_unlock (&mgr->priv->db_lock);
+        GList *ptr;
+        for (ptr = perms; ptr; ptr = ptr->next)
+            folder_perm_free ((FolderPerm *)ptr->data);
+        g_list_free (perms);
+        return NULL;
+    }
+
+    pthread_mutex_unlock (&mgr->priv->db_lock);
+
+    /* Sort list in descending order by perm->path (longer path first). */
+    perms = g_list_sort (perms, comp_folder_perms);
+
+    return perms;
+}
+
 gboolean
 is_repo_id_valid (const char *id)
 {
@@ -3804,6 +3941,9 @@ open_db (SeafRepoManager *manager, const char *seaf_dir)
         "PRIMARY KEY (repo_id, path));";
     sqlite_query_exec (db, sql);
 #endif
+
+    sql = "CREATE TABLE IF NOT EXISTS FolderPerms (repo_id TEXT, path TEXT, permission TEXT, PRIMARY KEY (repo_id));";
+    sqlite_query_exec (db, sql);
 
     return db;
 }

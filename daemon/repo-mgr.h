@@ -430,6 +430,8 @@ seaf_repo_fetch_and_checkout (struct _TransferTask *task,
 gboolean
 seaf_repo_manager_is_ignored_hidden_file (const char *filename);
 
+/* Locked files. */
+
 #define LOCKED_OP_UPDATE "update"
 #define LOCKED_OP_DELETE "delete"
 
@@ -463,5 +465,21 @@ locked_file_set_remove (LockedFileSet *fset, const char *path, gboolean db_only)
 
 LockedFile *
 locked_file_set_lookup (LockedFileSet *fset, const char *path);
+
+/* Folder Permissions. */
+
+typedef struct _FolderPerm {
+    char *path;
+    char *permission;
+} FolderPerm;
+
+int
+seaf_repo_manager_update_folder_perms (SeafRepoManager *mgr,
+                                       const char *repo_id,
+                                       GList *folder_perms);
+
+GList *
+seaf_repo_manager_load_folder_perms (SeafRepoManager *mgr,
+                                     const char *repo_id);
 
 #endif

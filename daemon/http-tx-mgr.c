@@ -851,6 +851,144 @@ http_tx_manager_check_head_commit (HttpTxManager *manager,
     return 0;
 }
 
+/* Get folder permissions. */
+
+typedef struct {
+    char repo_id[41];
+    char *host;
+    char *token;
+    HttpGetFolderPermsCallback callback;
+    void *user_data;
+
+    gboolean success;
+    GList *perms;
+} GetFolderPermsData;
+
+static int
+parse_folder_perms (const char *rsp_content, int rsp_size, GetFolderPermsData *data)
+{
+    json_t *object = NULL;
+    json_error_t jerror;
+    const char *head_commit;
+
+    object = json_loadb (rsp_content, rsp_size, 0, &jerror);
+    if (!object) {
+        seaf_warning ("Parse response failed: %s.\n", jerror.text);
+        return -1;
+    }
+
+    if (json_object_has_member (object, "is_corrupted") &&
+        json_object_get_int_member (object, "is_corrupted"))
+        data->is_corrupt = TRUE;
+
+    if (!data->is_corrupt) {
+        head_commit = json_object_get_string_member (object, "head_commit_id");
+        if (!head_commit) {
+            seaf_warning ("Check head commit for repo %s failed. "
+                          "Response doesn't contain head commit id.\n",
+                          data->repo_id);
+            json_decref (object);
+            return -1;
+        }
+        memcpy (data->head_commit, head_commit, 40);
+    }
+
+    json_decref (object);
+    return 0;
+}
+
+static void *
+get_folder_perms_thread (void *vdata)
+{
+    GetFolderPermsData *data = vdata;
+    HttpTxPriv *priv = seaf->http_tx_mgr->priv;
+    ConnectionPool *pool;
+    Connection *conn;
+    CURL *curl;
+    char *url;
+    int status;
+    char *rsp_content = NULL;
+    gint64 rsp_size;
+
+    pool = find_connection_pool (priv, data->host);
+    if (!pool) {
+        seaf_warning ("Failed to create connection pool for host %s.\n", data->host);
+        return vdata;
+    }
+
+    conn = connection_pool_get_connection (pool);
+    if (!conn) {
+        seaf_warning ("Failed to get connection to host %s.\n", data->host);
+        return vdata;
+    }
+
+    curl = conn->curl;
+
+    url = g_strdup_printf ("%s/seafhttp/repo/%s/folder-perm",
+                           data->host, data->repo_id);
+
+    if (http_get (curl, url, data->token, &status, &rsp_content, &rsp_size,
+                  NULL, NULL) < 0)
+        goto out;
+
+    if (status == HTTP_OK) {
+        if (parse_folder_perms (rsp_content, rsp_size, data) < 0)
+            goto out;
+        data->success = TRUE;
+    } else {
+        seaf_warning ("Bad response code for GET %s: %d.\n", url, status);
+    }
+
+out:
+    g_free (url);
+    g_free (rsp_content);
+    connection_pool_return_connection (pool, conn);
+    return vdata;
+}
+
+static void
+check_head_commit_done (void *vdata)
+{
+    CheckHeadData *data = vdata;
+    HttpHeadCommit result;
+
+    memset (&result, 0, sizeof(result));
+    result.check_success = data->success;
+    result.is_corrupt = data->is_corrupt;
+    result.is_deleted = data->is_deleted;
+    memcpy (result.head_commit, data->head_commit, 40);
+
+    data->callback (&result, data->user_data);
+
+    g_free (data->host);
+    g_free (data->token);
+    g_free (data);
+}
+
+int
+http_tx_manager_get_folder_perms (HttpTxManager *manager,
+                                  const char *repo_id,
+                                  const char *host,
+                                  const char *token,
+                                  HttpGetFolderPermsCallback callback,
+                                  void *user_data)
+{
+    GetFolderPermsData *data = g_new0 (GetFolderPermsData, 1);
+
+    memcpy (data->repo_id, repo_id, 36);
+    data->host = g_strdup(host);
+    data->token = g_strdup(token);
+    data->callback = callback;
+    data->user_data = user_data;
+
+    ccnet_job_manager_schedule_job (seaf->job_mgr,
+                                    get_folder_perms_thread,
+                                    get_folder_perms_done,
+                                    data);
+
+    return 0;
+}
+
 static gboolean
 remove_task_help (gpointer key, gpointer value, gpointer user_data)
 {
